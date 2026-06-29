@@ -3,7 +3,20 @@ import type { StellarAmount } from "./amount.js";
 import type { AccountAddress, MuxedAddress, ContractAddress } from "./address.js";
 
 export { SorobanRpcClient } from "./SorobanRpcClient.js";
-export type { SorobanRpcClientOptions } from "./SorobanRpcClient.js";
+export type {
+  JsonRpcFailure,
+  JsonRpcResponse,
+  JsonRpcSuccess,
+  SorobanEventFilter,
+  SorobanEventXdrFormat,
+  SorobanGetEventsParams,
+  SorobanGetEventsResult,
+  SorobanLatestLedgerResult,
+  SorobanNetworkInfo,
+  SorobanRpcCallOptions,
+  SorobanRpcClientOptions,
+  SorobanRpcEvent,
+} from "./SorobanRpcClient.js";
 export { EventEngine } from "./EventEngine.js";
 export { SorobanSubscriber } from "./SorobanSubscriber.js";
 export type {
@@ -16,11 +29,23 @@ export type {
 
 export { validateContractFilters } from "./contractFilters.js";
 export { Watcher } from "./Watcher.js";
+export { toStellarAmount, toBigInt } from "./amount.js";
 export type { StellarAmount } from "./amount.js";
 export type { AccountAddress, MuxedAddress, ContractAddress } from "./address.js";
+export {
+  isAccountAddress,
+  isMuxedAddress,
+  isContractAddress,
+  isStellarAddress,
+  toAccountAddress,
+  toMuxedAddress,
+  toContractAddress,
+} from "./address.js";
 export { EngineAlreadyStartedError, HorizonStreamError } from "./errors.js";
 export { StrKey } from "@stellar/stellar-sdk";
 export { CursorStore } from "./CursorStore.js";
+export type { CursorStoreLike } from "./CursorStore.js";
+import type { CursorStoreLike } from "./CursorStore.js";
 export { MemoryCursorStore } from "./MemoryCursorStore.js";
 export { FileCursorStore } from "./FileCursorStore.js";
 export { PostgresCursorStore } from "./PostgresCursorStore.js";
@@ -99,14 +124,15 @@ export type ClaimableClaimedEventType = "claimable.claimed";
 export type TrustlineEventType = "trustline.added" | "trustline.removed" | "trustline.updated";
 /** Event type for account merges (one account merged into another). */
 export type AccountMergeEventType = "account.merged";
-/** Notification types emitted by the EventEngine during reconnection. */
+/** Notification types emitted by the EventEngine during reconnection or event decoding. */
 export type WatcherNotificationType =
   | "engine.reconnecting"
   | "engine.reconnected"
   | "engine.rate_limited"
   | "engine.stopped"
   | "engine.cursor_store_unhealthy"
-  | "engine.cursor_expired";
+  | "engine.cursor_expired"
+  | "event.decode_failed";
 
 export type OfferEventType = "offer.created" | "offer.updated" | "offer.deleted";
 export type BumpSequenceEventType = "account.bump_sequence";
@@ -359,8 +385,7 @@ export type NormalizedEvent = (
   | LiquidityPoolDepositEvent
   | LiquidityPoolWithdrawEvent
   | TrustAuthEvent
-  | ContractInvokedEvent
-  | ContractEmittedEvent
+  | ContractEvent
 ) & {
   /** Lazy, cached `Date` derived from `event.timestamp`. Non-enumerable; does not appear in JSON.stringify output. */
   readonly timestampDate: Date;
@@ -391,6 +416,10 @@ export type WatcherNotification = {
   emittedAt: string;
   /** The cursor value that was expired or lost, if applicable. */
   lostCursor?: string;
+  /** The raw operation type string that could not be decoded (for "event.decode_failed" events). */
+  operationType?: string;
+  /** The raw record that failed to decode (for "event.decode_failed" events). */
+  record?: unknown;
 };
 
 /**
@@ -428,6 +457,22 @@ export interface AbiRegistryClientLike {
   getSpec(contractId: string): Promise<unknown>;
 }
 
+export type SorobanConfig = {
+  /** Soroban RPC endpoint used for live contract-event polling. */
+  rpcUrl: string;
+  /** Optional headers forwarded to the Soroban RPC endpoint. */
+  rpcHeaders?: Record<string, string>;
+  /** Interval between Soroban polls in milliseconds. Defaults to 2,000. */
+  pollIntervalMs?: number;
+  /** Number of ledgers to look back from the latest ledger on the first poll. Defaults to 0. */
+  startLedgerLookback?: number;
+  /**
+   * Pagination limit for each Soroban RPC `getEvents` call.
+   * Must be an integer from 1 through 10,000. Defaults to 100.
+   */
+  pageLimit?: number;
+};
+
 export type CoreConfig = {
   /** The Stellar network to connect to. */
   network: Network;
@@ -437,7 +482,7 @@ export type CoreConfig = {
   reconnect?: ReconnectConfig;
   logger?: Logger;
   /** Optional cursor store for resumable streams. */
-  cursorStore?: CursorStore;
+  cursorStore?: CursorStoreLike;
   /** Key to use for cursor storage. Defaults to "pulse-core-cursor". */
   streamKey?: string;
   /** Number of consecutive cursor store failures before marking it unhealthy. Defaults to 5. */
@@ -445,10 +490,7 @@ export type CoreConfig = {
   /** Optional ABI registry client used to enrich `contract.emitted` events with `decodedData`. */
   abiRegistry?: AbiRegistryClientLike;
   /** Soroban RPC configuration. */
-  soroban?: {
-    /** Pagination limit for RPC `getEvents` calls. Must be 1–10,000. Defaults to 100. */
-    pageLimit?: number;
-  };
+  soroban?: SorobanConfig;
 };
 
 // Error class for invalid network validation
@@ -532,7 +574,15 @@ export type ContractEmittedEvent = {
   raw?: RawSorobanEvent;
 };
 
+/** Discriminated union of every normalized Soroban contract event. */
 export type ContractEvent = ContractInvokedEvent | ContractEmittedEvent;
+
+export type DecodeFailedNotification = {
+  type: "event.decode_failed";
+  contractId: ContractAddress;
+  eventId?: string;
+  error: string;
+};
 
 /**
  * Filter criteria for a contract subscription.
